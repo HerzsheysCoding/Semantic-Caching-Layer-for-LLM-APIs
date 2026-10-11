@@ -22,6 +22,30 @@ class DualTierCacheStore:
         payload = f"{meta.tenant_id}|{meta.model}|{meta.system_prompt_hash}|{meta.temperature}|{query.strip().lower()}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    def _is_expired(self, entry: CachedEntry, current_time: Optional[float] = None) -> bool:
+        t = current_time or time.time()
+        expiry = entry.metadata.created_at.timestamp() + entry.metadata.ttl_seconds
+        return t > expiry
+
+    def _evict(self, entry_id: str, exact_key: str) -> None:
+        self._entries.pop(entry_id, None)
+        self._l1_table.pop(exact_key, None)
+        if entry_id in self._index_ids:
+            idx = self._index_ids.index(entry_id)
+            self._index_ids.pop(idx)
+            self._embeddings_matrix = np.delete(self._embeddings_matrix, idx, axis=0)
+            if len(self._index_ids) == 0:
+                self._embeddings_matrix = None
+
+    def _evict_oldest(self) -> None:
+        if not self._index_ids:
+            return
+        oldest_id = self._index_ids[0]
+        oldest_entry = self._entries.get(oldest_id)
+        if oldest_entry:
+            key = self.compute_exact_key(oldest_entry.query, oldest_entry.metadata)
+            self._evict(oldest_id, key)
+
     def get_l1_exact(self, exact_key: str) -> Optional[CachedEntry]:
         with self.lock:
             entry_id = self._l1_table.get(exact_key)
@@ -46,6 +70,7 @@ class DualTierCacheStore:
 
             scores = np.dot(self._embeddings_matrix, query_vector)
             sorted_indices = np.argsort(scores)[::-1]
+            top_score = float(scores[sorted_indices[0]]) if len(sorted_indices) > 0 else 0.0
 
             now = time.time()
             for idx in sorted_indices:
@@ -68,7 +93,7 @@ class DualTierCacheStore:
 
                 return entry, score
 
-            return None, 0.0
+            return None, top_score
 
     def insert(self, entry: CachedEntry) -> None:
         with self.lock:
@@ -87,27 +112,3 @@ class DualTierCacheStore:
             else:
                 self._embeddings_matrix = np.vstack([self._embeddings_matrix, vector])
                 self._index_ids.append(entry.entry_id)
-
-        def _is_expired(self, entry: CachedEntry, current_time: Optional[float] = None) -> bool:
-            t = current_time or time.time()
-            expiry = entry.metadata.created_at.timestamp() + entry.metadata.ttl_seconds
-            return t > expiry
-
-    def _evict(self, entry_id: str, exact_key: str) -> None:
-        self._entries.pop(entry_id, None)
-        self._l1_table.pop(exact_key, None)
-        if entry_id in self._index_ids:
-            idx = self._index_ids.index(entry_id)
-            self._index_ids.pop(idx)
-            self._embeddings_matrix = np.delete(self._embeddings_matrix, idx, axis=0)
-            if len(self._index_ids) == 0:
-                self._embeddings_matrix = None
-
-    def _evict_oldest(self) -> None:
-        if not self._index_ids:
-            return
-        oldest_id = self._index_ids[0]
-        oldest_entry = self._entries.get(oldest_id)
-        if oldest_entry:
-            key = self.compute_exact_key(oldest_entry.query, oldest_entry.metadata)
-            self._evict(oldest_id, key)
