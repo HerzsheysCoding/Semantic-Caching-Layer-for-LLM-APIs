@@ -1,10 +1,15 @@
 import asyncio
 import json
+import threading
 import time
 import uuid
-from typing import AsyncGenerator
+from dataclasses import dataclass
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+import faiss
 from fastapi import BackgroundTasks, FastAPI
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+import numpy as np
+
 from schemas import (
     CacheConfig,
     ChatCompletionChoice,
@@ -15,10 +20,141 @@ from schemas import (
 )
 from semantic_cache import SemanticCache
 
+
+@dataclass
+class MigrationStatus:
+    active: bool
+    live_model: str
+    shadow_model: Optional[str]
+    live_vector_count: int
+    shadow_vector_count: int
+    readiness_pct: float
+    can_swap: bool
+
+
+class ShadowIndexManager:
+    def __init__(self, initial_model: str = "all-MiniLM-L6-v2", dimension: int = 384, ef_construction: int = 64, m: int = 16):
+        self.live_model = initial_model
+        self.shadow_model: Optional[str] = None
+        self.dimension = dimension
+        self.ef_construction = ef_construction
+        self.m = m
+
+        self.live_index = self._build_hnsw_index(self.dimension)
+        self.live_metadata: Dict[int, Dict[str, Any]] = {}
+        self.live_counter = 0
+
+        self.shadow_index: Optional[faiss.IndexHNSWFlat] = None
+        self.shadow_metadata: Dict[int, Dict[str, Any]] = {}
+        self.shadow_counter = 0
+
+        self.canary_index: Optional[faiss.IndexHNSWFlat] = None
+        self.canary_metadata: Dict[int, Dict[str, Any]] = {}
+        self.canary_model: Optional[str] = None
+
+        self._swap_lock = threading.RLock()
+        self._is_migrating = False
+        self._warmup_target = 0
+
+    def _build_hnsw_index(self, dim: int) -> faiss.IndexHNSWFlat:
+        index = faiss.IndexHNSWFlat(dim, self.m, faiss.METRIC_INNER_PRODUCT)
+        index.hnsw.efConstruction = self.ef_construction
+        index.hnsw.efSearch = 32
+        return index
+
+    def start_migration(self, target_model: str, target_dim: int, target_entries: Optional[int] = None) -> None:
+        with self._swap_lock:
+            self.shadow_model = target_model
+            self.shadow_index = self._build_hnsw_index(target_dim)
+            self.shadow_metadata = {}
+            self.shadow_counter = 0
+            self._warmup_target = target_entries or max(len(self.live_metadata), 5)
+            self._is_migrating = True
+
+    def query_live(self, query_vector: np.ndarray, top_k: int = 1) -> List[Tuple[float, Dict[str, Any]]]:
+        with self._swap_lock:
+            if self.live_index.ntotal == 0:
+                return []
+            distances, indices = self.live_index.search(query_vector, top_k)
+            results = []
+            for sim, idx in zip(distances[0], indices[0]):
+                if idx in self.live_metadata:
+                    results.append((float(sim), self.live_metadata[idx]))
+            return results
+
+    def write_live(self, vector: np.ndarray, metadata: Dict[str, Any]) -> int:
+        with self._swap_lock:
+            idx = self.live_counter
+            self.live_index.add(vector)
+            self.live_metadata[idx] = metadata
+            self.live_counter += 1
+            return idx
+
+    def write_shadow(self, vector: np.ndarray, metadata: Dict[str, Any]) -> Optional[int]:
+        with self._swap_lock:
+            if not self._is_migrating or self.shadow_index is None:
+                return None
+            idx = self.shadow_counter
+            self.shadow_index.add(vector)
+            self.shadow_metadata[idx] = metadata
+            self.shadow_counter += 1
+            return idx
+
+    def get_status(self) -> MigrationStatus:
+        with self._swap_lock:
+            live_count = len(self.live_metadata)
+            shadow_count = len(self.shadow_metadata) if self._is_migrating else 0
+            readiness = min(100.0, (shadow_count / self._warmup_target * 100.0)) if (self._warmup_target and self._is_migrating) else (100.0 if not self._is_migrating else 0.0)
+
+            return MigrationStatus(
+                active=self._is_migrating,
+                live_model=self.live_model,
+                shadow_model=self.shadow_model,
+                live_vector_count=live_count,
+                shadow_vector_count=shadow_count,
+                readiness_pct=round(readiness, 2),
+                can_swap=self._is_migrating and (shadow_count >= self._warmup_target),
+            )
+
+    def atomic_swap(self) -> bool:
+        with self._swap_lock:
+            if not self._is_migrating or self.shadow_index is None:
+                return False
+
+            self.canary_index = self.live_index
+            self.canary_metadata = self.live_metadata
+            self.canary_model = self.live_model
+
+            self.live_index = self.shadow_index
+            self.live_metadata = self.shadow_metadata
+            self.live_counter = self.shadow_counter
+            self.live_model = self.shadow_model
+
+            self.shadow_index = None
+            self.shadow_metadata = {}
+            self.shadow_model = None
+            self._is_migrating = False
+            return True
+
+    def rollback(self) -> bool:
+        with self._swap_lock:
+            if self.canary_index is None or self.canary_model is None:
+                return False
+
+            self.live_index = self.canary_index
+            self.live_metadata = self.canary_metadata
+            self.live_model = self.canary_model
+            self.canary_index = None
+            self.canary_metadata = {}
+            self.canary_model = None
+            return True
+
+
 app = FastAPI(title="Enterprise Semantic Cache Gateway", version="1.0.0")
 
 config = CacheConfig(similarity_threshold=0.82, ttl_seconds=86400)
 cache_engine = SemanticCache(config)
+migration_engine = ShadowIndexManager(initial_model="all-MiniLM-L6-v2", dimension=384)
 
 
 async def upstream_mock_llm(prompt: str) -> str:
@@ -50,6 +186,47 @@ async def sse_stream_response(content: str, model: str) -> AsyncGenerator[str, N
     }
     yield f"data: {json.dumps(final_payload)}\n\n"
     yield "data: [DONE]\n\n"
+
+
+def async_cache_write_pipeline(
+    prompt: str,
+    response: str,
+    system_prompt: Optional[str],
+    tenant_id: str,
+    model: str,
+    temperature: float,
+    token_count: int,
+):
+    cache_engine.async_write(
+        prompt=prompt,
+        response=response,
+        system_prompt=system_prompt,
+        tenant_id=tenant_id,
+        model=model,
+        temperature=temperature,
+        token_count=token_count,
+    )
+
+    try:
+        vec = cache_engine.embedder.encode(prompt)
+        migration_engine.write_live(vec, {
+            "prompt": prompt,
+            "response": response,
+            "tenant_id": tenant_id,
+            "model": model,
+            "timestamp": time.time(),
+        })
+
+        if migration_engine.get_status().active:
+            migration_engine.write_shadow(vec, {
+                "prompt": prompt,
+                "response": response,
+                "tenant_id": tenant_id,
+                "model": model,
+                "timestamp": time.time(),
+            })
+    except Exception:
+        pass
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -278,7 +455,7 @@ def home():
             font-size: 12px;
             line-height: 1.5;
             resize: vertical;
-            height: 110px;
+            height: 90px;
         }
 
         .btn-primary {
@@ -387,10 +564,19 @@ def home():
             font-family: 'IBM Plex Mono', monospace;
             font-size: 11px;
             color: #8bb4f7;
-            max-height: 320px;
+            max-height: 250px;
             overflow-y: auto;
             white-space: pre-wrap;
             word-break: break-all;
+        }
+
+        .migration-box {
+            border: 1px solid var(--cds-border);
+            background-color: #1a1a1a;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
         }
 
         @media (max-width: 1024px) {
@@ -414,7 +600,7 @@ def home():
         <div class="header-meta">
             <div class="status-indicator">
                 <span class="status-dot"></span>
-                <span>FAISS HNSW ACTIVE</span>
+                <span id="headerEngineTag">FAISS HNSW ACTIVE</span>
             </div>
             <span>SPEC: RFC-OpenAI-v1</span>
         </div>
@@ -465,6 +651,23 @@ def home():
                     <span>Execute Inference Pipeline</span>
                     <span style="font-family: 'IBM Plex Mono'; font-size: 11px;">→</span>
                 </button>
+
+                <div class="migration-box">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span class="preset-label">Blue/Green Shadow Index</span>
+                        <span id="migrationStateTag" class="tag tag-idle">SYNCHRONIZED</span>
+                    </div>
+                    <div style="font-size: 11px; color: var(--cds-text-03); font-family: 'IBM Plex Mono'; line-height: 1.5;">
+                        Active Model: <span id="liveModelLabel" style="color: #ffffff;">all-MiniLM-L6-v2</span><br>
+                        Shadow Target: <span id="shadowModelLabel" style="color: var(--cds-text-02);">None</span><br>
+                        Index Warmup Parity: <span id="readinessLabel" style="color: var(--cds-support-04);">0.0%</span>
+                    </div>
+                    <div class="preset-buttons">
+                        <button type="button" class="btn-preset" onclick="triggerStartMigration()">1. Tap Shadow</button>
+                        <button type="button" class="btn-preset" onclick="triggerAtomicSwap()" id="swapBtn">2. Swap Pointer</button>
+                        <button type="button" class="btn-preset" onclick="triggerRollback()">3. Canary Revert</button>
+                    </div>
+                </div>
             </div>
         </section>
 
@@ -517,6 +720,57 @@ def home():
         function applyPreset(type) {
             document.getElementById('promptInput').value = PRESETS[type];
         }
+
+        async function updateMigrationStatus() {
+            try {
+                const res = await fetch('/v1/admin/migration/status');
+                const data = await res.json();
+                const tag = document.getElementById('migrationStateTag');
+                const liveLbl = document.getElementById('liveModelLabel');
+                const shadowLbl = document.getElementById('shadowModelLabel');
+                const readyLbl = document.getElementById('readinessLabel');
+
+                liveLbl.innerText = data.live_model;
+                shadowLbl.innerText = data.shadow_model || "None";
+                readyLbl.innerText = `${data.readiness_pct}% (${data.shadow_vector_count}/${data.live_vector_count} dual-writes)`;
+
+                if (data.active) {
+                    tag.className = data.can_swap ? "tag tag-semantic" : "tag tag-exact";
+                    tag.innerText = data.can_swap ? "SWAP READY" : "INGESTING SHADOW";
+                } else {
+                    tag.className = "tag tag-idle";
+                    tag.innerText = "SYNCHRONIZED";
+                }
+            } catch (e) {
+                console.error("Migration status poll error", e);
+            }
+        }
+
+        async function triggerStartMigration() {
+            await fetch('/v1/admin/migration/start', { method: 'POST' });
+            await updateMigrationStatus();
+        }
+
+        async function triggerAtomicSwap() {
+            const res = await fetch('/v1/admin/migration/swap', { method: 'POST' });
+            const data = await res.json();
+            if (data.status === "error") {
+                alert(data.message);
+            }
+            await updateMigrationStatus();
+        }
+
+        async function triggerRollback() {
+            const res = await fetch('/v1/admin/migration/rollback', { method: 'POST' });
+            const data = await res.json();
+            if (data.status === "error") {
+                alert(data.message);
+            }
+            await updateMigrationStatus();
+        }
+
+        setInterval(updateMigrationStatus, 4000);
+        updateMigrationStatus();
 
         async function executeGatewayRequest() {
             const submitBtn = document.getElementById('submitBtn');
@@ -578,6 +832,7 @@ def home():
 
                 outputBlock.innerText = data.choices[0].message.content;
                 rawJsonBlock.innerText = JSON.stringify(data, null, 2);
+                updateMigrationStatus();
 
             } catch (err) {
                 tierTag.className = "tag tag-miss";
@@ -596,7 +851,40 @@ def home():
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "entries_cached": len(cache_engine.store._entries)}
+    status = migration_engine.get_status()
+    return {
+        "status": "healthy",
+        "entries_cached": len(cache_engine.store._entries),
+        "active_model": status.live_model,
+        "migration_active": status.active,
+    }
+
+
+@app.post("/v1/admin/migration/start")
+def start_model_migration(target_model: str = "bge-small-en-v1.5", target_dim: int = 384):
+    migration_engine.start_migration(target_model=target_model, target_dim=target_dim, target_entries=3)
+    return {"status": "migration_started", "telemetry": migration_engine.get_status()}
+
+
+@app.get("/v1/admin/migration/status")
+def get_migration_status():
+    return migration_engine.get_status()
+
+
+@app.post("/v1/admin/migration/swap")
+def execute_atomic_pointer_swap():
+    success = migration_engine.atomic_swap()
+    if not success:
+        return {"status": "error", "message": "Shadow index not ready or warmup target unreached."}
+    return {"status": "swapped_successfully", "active_model": migration_engine.live_model}
+
+
+@app.post("/v1/admin/migration/rollback")
+def rollback_migration():
+    success = migration_engine.rollback()
+    if not success:
+        return {"status": "error", "message": "No canary index available to roll back."}
+    return {"status": "rollback_completed", "active_model": migration_engine.live_model}
 
 
 @app.post("/v1/chat/completions")
@@ -642,7 +930,7 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
     fresh_response = await upstream_mock_llm(user_prompt)
 
     background_tasks.add_task(
-        cache_engine.async_write,
+        async_cache_write_pipeline,
         prompt=user_prompt,
         response=fresh_response,
         system_prompt=system_prompt,
