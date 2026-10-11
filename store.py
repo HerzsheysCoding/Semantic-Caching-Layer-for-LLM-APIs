@@ -2,6 +2,7 @@ import hashlib
 import threading
 import time
 from typing import Dict, List, Optional, Tuple
+import faiss
 import numpy as np
 from schemas import CachedEntry, CacheMetadata
 
@@ -14,8 +15,13 @@ class DualTierCacheStore:
 
         self._l1_table: Dict[str, str] = {}
         self._entries: Dict[str, CachedEntry] = {}
-        self._index_ids: List[str] = []
-        self._embeddings_matrix: Optional[np.ndarray] = None
+
+        quantizer = faiss.IndexHNSWFlat(self.embedding_dim, 32, faiss.METRIC_INNER_PRODUCT)
+        self._faiss_index = faiss.IndexIDMap2(quantizer)
+
+        self._id_to_int: Dict[str, int] = {}
+        self._int_to_id: Dict[int, str] = {}
+        self._id_counter: int = 0
 
     @staticmethod
     def compute_exact_key(query: str, meta: CacheMetadata) -> str:
@@ -30,21 +36,17 @@ class DualTierCacheStore:
     def _evict(self, entry_id: str, exact_key: str) -> None:
         self._entries.pop(entry_id, None)
         self._l1_table.pop(exact_key, None)
-        if entry_id in self._index_ids:
-            idx = self._index_ids.index(entry_id)
-            self._index_ids.pop(idx)
-            self._embeddings_matrix = np.delete(self._embeddings_matrix, idx, axis=0)
-            if len(self._index_ids) == 0:
-                self._embeddings_matrix = None
+        int_id = self._id_to_int.pop(entry_id, None)
+        if int_id is not None:
+            self._int_to_id.pop(int_id, None)
 
     def _evict_oldest(self) -> None:
-        if not self._index_ids:
+        if not self._entries:
             return
-        oldest_id = self._index_ids[0]
-        oldest_entry = self._entries.get(oldest_id)
-        if oldest_entry:
-            key = self.compute_exact_key(oldest_entry.query, oldest_entry.metadata)
-            self._evict(oldest_id, key)
+        oldest_id = next(iter(self._entries))
+        oldest_entry = self._entries[oldest_id]
+        key = self.compute_exact_key(oldest_entry.query, oldest_entry.metadata)
+        self._evict(oldest_id, key)
 
     def get_l1_exact(self, exact_key: str) -> Optional[CachedEntry]:
         with self.lock:
@@ -63,23 +65,41 @@ class DualTierCacheStore:
         query_vector: np.ndarray,
         meta: CacheMetadata,
         threshold: float,
+        top_k: int = 5,
     ) -> Tuple[Optional[CachedEntry], float]:
         with self.lock:
-            if self._embeddings_matrix is None or len(self._index_ids) == 0:
+            if self._faiss_index.ntotal == 0 or len(self._entries) == 0:
                 return None, 0.0
 
-            scores = np.dot(self._embeddings_matrix, query_vector)
-            sorted_indices = np.argsort(scores)[::-1]
-            top_score = float(scores[sorted_indices[0]]) if len(sorted_indices) > 0 else 0.0
+            q_vector = np.ascontiguousarray(query_vector.reshape(1, -1), dtype=np.float32)
+            search_k = min(top_k, self._faiss_index.ntotal)
+            scores, indices = self._faiss_index.search(q_vector, search_k)
 
             now = time.time()
-            for idx in sorted_indices:
-                score = float(scores[idx])
-                if score < threshold:
+            top_score = 0.0
+
+            for score, int_id in zip(scores[0], indices[0]):
+                if int_id == -1:
                     break
 
-                entry_id = self._index_ids[idx]
-                entry = self._entries[entry_id]
+                entry_id = self._int_to_id.get(int(int_id))
+                if not entry_id:
+                    continue
+
+                entry = self._entries.get(entry_id)
+                if not entry:
+                    continue
+
+                if self._is_expired(entry, now):
+                    exact_key = self.compute_exact_key(entry.query, entry.metadata)
+                    self._evict(entry_id, exact_key)
+                    continue
+
+                if top_score == 0.0:
+                    top_score = float(score)
+
+                if score < threshold:
+                    break
 
                 if (
                     entry.metadata.tenant_id != meta.tenant_id
@@ -88,10 +108,7 @@ class DualTierCacheStore:
                 ):
                     continue
 
-                if self._is_expired(entry, now):
-                    continue
-
-                return entry, score
+                return entry, float(score)
 
             return None, top_score
 
@@ -102,13 +119,14 @@ class DualTierCacheStore:
             if len(self._entries) >= self.max_entries:
                 self._evict_oldest()
 
+            int_id = self._id_counter
+            self._id_counter += 1
+
             self._l1_table[exact_key] = entry.entry_id
             self._entries[entry.entry_id] = entry
+            self._id_to_int[entry.entry_id] = int_id
+            self._int_to_id[int_id] = entry.entry_id
 
-            vector = np.array(entry.embedding, dtype=np.float32).reshape(1, -1)
-            if self._embeddings_matrix is None or len(self._index_ids) == 0:
-                self._embeddings_matrix = vector
-                self._index_ids = [entry.entry_id]
-            else:
-                self._embeddings_matrix = np.vstack([self._embeddings_matrix, vector])
-                self._index_ids.append(entry.entry_id)
+            vector = np.ascontiguousarray(np.array([entry.embedding], dtype=np.float32))
+            id_array = np.array([int_id], dtype=np.int64)
+            self._faiss_index.add_with_ids(vector, id_array)

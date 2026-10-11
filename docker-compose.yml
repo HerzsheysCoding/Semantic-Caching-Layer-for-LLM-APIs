@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  semantic-cache-gateway:
+    build: .
+    container_name: semantic_cache_gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3

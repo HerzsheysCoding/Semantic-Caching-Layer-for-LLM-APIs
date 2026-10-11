@@ -1,6 +1,6 @@
 import time
-from semantic_cache import SemanticCache
 from schemas import CacheConfig
+from semantic_cache import SemanticCache
 
 
 def mock_expensive_llm(prompt: str) -> str:

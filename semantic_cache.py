@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import time
 import uuid
@@ -18,7 +19,6 @@ class SemanticCache:
             embedding_dim=self.embedder.dimension,
             max_entries=self.config.max_entries,
         )
-        self.cost_per_1k_tokens = 0.01
 
     def _hash_system_prompt(self, system_prompt: Optional[str]) -> str:
         if not system_prompt:
@@ -112,10 +112,33 @@ class SemanticCache:
         )
         self.store.insert(entry)
 
+    async def async_write(
+        self,
+        prompt: str,
+        response: str,
+        system_prompt: Optional[str] = None,
+        tenant_id: str = "default",
+        model: str = "gpt-4o",
+        temperature: float = 0.0,
+        token_count: int = 0,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            self.write,
+            prompt,
+            response,
+            system_prompt,
+            tenant_id,
+            model,
+            temperature,
+            token_count,
+        )
+
     def _calculate_saved_cost(self, tokens: int) -> float:
         if tokens <= 0:
             tokens = 350
-        return round((tokens / 1000.0) * self.cost_per_1k_tokens, 5)
+        return round((tokens / 1000.0) * self.config.cost_per_1k_tokens, 5)
 
     def wrap(
         self,
