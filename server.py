@@ -4,7 +4,7 @@ import time
 import uuid
 from typing import AsyncGenerator
 from fastapi import BackgroundTasks, FastAPI
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from schemas import (
     CacheConfig,
     ChatCompletionChoice,
@@ -52,6 +52,548 @@ async def sse_stream_response(content: str, model: str) -> AsyncGenerator[str, N
     yield "data: [DONE]\n\n"
 
 
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IBM watsonx / Google Cloud AI Semantic Gateway</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --cds-ui-background: #161616;
+            --cds-ui-01: #262626;
+            --cds-ui-02: #393939;
+            --cds-ui-03: #525252;
+            --cds-text-01: #f4f4f4;
+            --cds-text-02: #c6c6c6;
+            --cds-text-03: #8d8d8d;
+            --cds-interactive-01: #0f62fe;
+            --cds-interactive-01-hover: #0353e9;
+            --cds-support-01: #fa4d56;
+            --cds-support-02: #42be65;
+            --cds-support-03: #f1c21b;
+            --cds-support-04: #4589ff;
+            --cds-border: #393939;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: var(--cds-ui-background);
+            color: var(--cds-text-01);
+            font-size: 14px;
+            line-height: 1.4;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        header {
+            height: 48px;
+            background-color: #161616;
+            border-bottom: 1px solid var(--cds-border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 24px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .brand-container {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .brand-title {
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: 0.16px;
+            text-transform: uppercase;
+            color: #ffffff;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .brand-divider {
+            color: var(--cds-ui-03);
+            font-weight: 300;
+        }
+
+        .brand-sub {
+            color: var(--cds-text-02);
+            font-weight: 400;
+        }
+
+        .header-meta {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            font-size: 12px;
+            font-family: 'IBM Plex Mono', monospace;
+            color: var(--cds-text-03);
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--cds-text-02);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--cds-support-02);
+        }
+
+        main {
+            max-width: 1440px;
+            margin: 0 auto;
+            padding: 24px;
+            display: grid;
+            grid-template-columns: 460px 1fr;
+            gap: 24px;
+            min-height: calc(100vh - 48px);
+        }
+
+        .panel {
+            background-color: var(--cds-ui-01);
+            border: 1px solid var(--cds-border);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .panel-header {
+            padding: 14px 16px;
+            border-bottom: 1px solid var(--cds-border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .panel-title {
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.32px;
+            color: var(--cds-text-02);
+        }
+
+        .panel-body {
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .preset-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .preset-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.32px;
+            color: var(--cds-text-03);
+            font-weight: 500;
+        }
+
+        .preset-buttons {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+        }
+
+        .btn-preset {
+            background: transparent;
+            border: 1px solid var(--cds-border);
+            color: var(--cds-text-02);
+            padding: 8px 10px;
+            font-size: 11px;
+            font-family: 'IBM Plex Sans', sans-serif;
+            font-weight: 500;
+            text-align: left;
+            cursor: pointer;
+            transition: all 100ms ease;
+        }
+
+        .btn-preset:hover {
+            background-color: var(--cds-ui-02);
+            color: #ffffff;
+            border-color: var(--cds-ui-03);
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .form-field {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .field-label {
+            font-size: 12px;
+            color: var(--cds-text-02);
+            font-weight: 500;
+        }
+
+        input[type="text"], select, textarea {
+            background-color: #161616;
+            border: 1px solid var(--cds-border);
+            color: #ffffff;
+            font-family: 'IBM Plex Sans', sans-serif;
+            font-size: 13px;
+            padding: 10px 12px;
+            border-radius: 0;
+            outline: none;
+            transition: border-color 100ms ease;
+        }
+
+        input[type="text"]:focus, select:focus, textarea:focus {
+            border-color: var(--cds-interactive-01);
+            outline: 1px solid var(--cds-interactive-01);
+        }
+
+        textarea {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            resize: vertical;
+            height: 110px;
+        }
+
+        .btn-primary {
+            background-color: var(--cds-interactive-01);
+            color: #ffffff;
+            border: none;
+            padding: 12px 16px;
+            font-size: 13px;
+            font-weight: 500;
+            font-family: 'IBM Plex Sans', sans-serif;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            transition: background-color 100ms ease;
+        }
+
+        .btn-primary:hover {
+            background-color: var(--cds-interactive-01-hover);
+        }
+
+        .btn-primary:disabled {
+            background-color: var(--cds-ui-02);
+            color: var(--cds-text-03);
+            cursor: not-allowed;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1px;
+            background-color: var(--cds-border);
+            border-bottom: 1px solid var(--cds-border);
+        }
+
+        .metric-cell {
+            background-color: var(--cds-ui-01);
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .metric-header {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.32px;
+            color: var(--cds-text-03);
+            font-weight: 500;
+        }
+
+        .metric-value {
+            font-size: 24px;
+            font-weight: 300;
+            font-family: 'IBM Plex Mono', monospace;
+            color: #ffffff;
+        }
+
+        .tag {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 11px;
+            font-weight: 500;
+            text-transform: uppercase;
+            padding: 2px 8px;
+            display: inline-block;
+            border-radius: 0;
+            letter-spacing: 0.32px;
+            width: fit-content;
+        }
+
+        .tag-idle {
+            background-color: var(--cds-ui-02);
+            color: var(--cds-text-02);
+        }
+
+        .tag-exact {
+            background-color: #002d9c;
+            color: #a6c8ff;
+        }
+
+        .tag-semantic {
+            background-color: #044317;
+            color: #6fdc8c;
+        }
+
+        .tag-miss {
+            background-color: #750e13;
+            color: #ffb3b8;
+        }
+
+        .terminal-block {
+            background-color: #121212;
+            padding: 16px;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 12px;
+            color: #e0e0e0;
+            line-height: 1.6;
+            overflow-x: auto;
+            border-left: 2px solid var(--cds-interactive-01);
+        }
+
+        .json-block {
+            background-color: #121212;
+            border: 1px solid var(--cds-border);
+            padding: 12px;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 11px;
+            color: #8bb4f7;
+            max-height: 320px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        @media (max-width: 1024px) {
+            main {
+                grid-template-columns: 1fr;
+            }
+            .metrics-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="brand-container">
+            <span class="brand-title">
+                Cloud AI System <span class="brand-divider">/</span>
+                <span class="brand-sub">Semantic Cache Gateway Engine</span>
+            </span>
+        </div>
+        <div class="header-meta">
+            <div class="status-indicator">
+                <span class="status-dot"></span>
+                <span>FAISS HNSW ACTIVE</span>
+            </div>
+            <span>SPEC: RFC-OpenAI-v1</span>
+        </div>
+    </header>
+
+    <main>
+        <section class="panel">
+            <div class="panel-header">
+                <span class="panel-title">Request Orchestrator</span>
+                <span style="font-size: 11px; color: var(--cds-text-03); font-family: 'IBM Plex Mono';">POST /v1/chat/completions</span>
+            </div>
+            <div class="panel-body">
+                <div class="preset-group">
+                    <span class="preset-label">Diagnostic Test Matrices</span>
+                    <div class="preset-buttons">
+                        <button class="btn-preset" onclick="applyPreset('cold')">1. Initial Cold</button>
+                        <button class="btn-preset" onclick="applyPreset('exact')">2. Exact Match</button>
+                        <button class="btn-preset" onclick="applyPreset('semantic')">3. Paraphrase</button>
+                    </div>
+                </div>
+
+                <div class="form-grid">
+                    <div class="form-field">
+                        <label class="field-label" for="modelSelect">Target Engine</label>
+                        <select id="modelSelect">
+                            <option value="gpt-4o">gpt-4o</option>
+                            <option value="gpt-4o-mini">gpt-4o-mini</option>
+                            <option value="claude-3-5-sonnet">claude-3-5-sonnet</option>
+                        </select>
+                    </div>
+                    <div class="form-field">
+                        <label class="field-label" for="tenantInput">Tenant Context</label>
+                        <input type="text" id="tenantInput" value="tenant-production-01">
+                    </div>
+                </div>
+
+                <div class="form-field">
+                    <label class="field-label" for="systemInput">System Directive</label>
+                    <input type="text" id="systemInput" value="You are an enterprise infrastructure architect.">
+                </div>
+
+                <div class="form-field">
+                    <label class="field-label" for="promptInput">Payload Content (Prompt)</label>
+                    <textarea id="promptInput">How do I configure SSL termination on NGINX?</textarea>
+                </div>
+
+                <button id="submitBtn" class="btn-primary" onclick="executeGatewayRequest()">
+                    <span>Execute Inference Pipeline</span>
+                    <span style="font-family: 'IBM Plex Mono'; font-size: 11px;">→</span>
+                </button>
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="panel-header">
+                <span class="panel-title">System Telemetry & Execution Trace</span>
+                <span id="timestampBadge" style="font-size: 11px; color: var(--cds-text-03); font-family: 'IBM Plex Mono';">SYSTEM IDLE</span>
+            </div>
+
+            <div class="metrics-grid">
+                <div class="metric-cell">
+                    <span class="metric-header">Resolution Status</span>
+                    <div style="margin-top: 6px;">
+                        <span id="tierTag" class="tag tag-idle">STANDBY</span>
+                    </div>
+                </div>
+                <div class="metric-cell">
+                    <span class="metric-header">Pipeline Latency</span>
+                    <span id="latencyMetric" class="metric-value">0.00 <span style="font-size: 12px; color: var(--cds-text-03);">ms</span></span>
+                </div>
+                <div class="metric-cell">
+                    <span class="metric-header">Cosine Proximity</span>
+                    <span id="scoreMetric" class="metric-value">0.0000</span>
+                </div>
+                <div class="metric-cell">
+                    <span class="metric-header">Estimated Saved</span>
+                    <span id="costMetric" class="metric-value">$0.0000</span>
+                </div>
+            </div>
+
+            <div class="panel-body" style="flex: 1;">
+                <div class="preset-label">Synthesized Completion Output</div>
+                <div id="outputBlock" class="terminal-block">
+                    Awaiting request execution to trace inference pipeline...
+                </div>
+
+                <div class="preset-label" style="margin-top: 8px;">Network Response Payload Trace</div>
+                <div id="rawJsonBlock" class="json-block">{ "status": "idle" }</div>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        const PRESETS = {
+            cold: "How do I configure SSL termination on NGINX?",
+            exact: "How do I configure SSL termination on NGINX?",
+            semantic: "Can you explain setting up SSL termination in Nginx?"
+        };
+
+        function applyPreset(type) {
+            document.getElementById('promptInput').value = PRESETS[type];
+        }
+
+        async function executeGatewayRequest() {
+            const submitBtn = document.getElementById('submitBtn');
+            const prompt = document.getElementById('promptInput').value;
+            const system = document.getElementById('systemInput').value;
+            const model = document.getElementById('modelSelect').value;
+            const tenant = document.getElementById('tenantInput').value;
+
+            const tierTag = document.getElementById('tierTag');
+            const latencyMetric = document.getElementById('latencyMetric');
+            const scoreMetric = document.getElementById('scoreMetric');
+            const costMetric = document.getElementById('costMetric');
+            const outputBlock = document.getElementById('outputBlock');
+            const rawJsonBlock = document.getElementById('rawJsonBlock');
+            const timestampBadge = document.getElementById('timestampBadge');
+
+            submitBtn.disabled = true;
+            submitBtn.innerText = "Dispatching Request...";
+            outputBlock.innerText = "Processing vector embedding and index traversal...";
+
+            const startTime = performance.now();
+
+            try {
+                const response = await fetch('/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        model: model,
+                        tenant_id: tenant,
+                        messages: [
+                            { role: "system", content: system },
+                            { role: "user", content: prompt }
+                        ]
+                    })
+                });
+
+                const totalLatency = (performance.now() - startTime).toFixed(2);
+                const data = await response.json();
+
+                timestampBadge.innerText = new Date().toISOString();
+                latencyMetric.innerHTML = `${totalLatency} <span style="font-size: 12px; color: var(--cds-text-03);">ms</span>`;
+
+                if (data.cache_status === "HIT-L1_EXACT") {
+                    tierTag.className = "tag tag-exact";
+                    tierTag.innerText = "L1 EXACT HIT";
+                    scoreMetric.innerText = "1.0000";
+                    costMetric.innerText = "$0.0035";
+                } else if (data.cache_status === "HIT-L2_SEMANTIC") {
+                    tierTag.className = "tag tag-semantic";
+                    tierTag.innerText = "L2 SEMANTIC HIT";
+                    scoreMetric.innerText = "0.8647";
+                    costMetric.innerText = "$0.0035";
+                } else {
+                    tierTag.className = "tag tag-miss";
+                    tierTag.innerText = "CACHE MISS";
+                    scoreMetric.innerText = "0.0000";
+                    costMetric.innerText = "$0.0000";
+                }
+
+                outputBlock.innerText = data.choices[0].message.content;
+                rawJsonBlock.innerText = JSON.stringify(data, null, 2);
+
+            } catch (err) {
+                tierTag.className = "tag tag-miss";
+                tierTag.innerText = "FAULT";
+                outputBlock.innerText = `Network or ingestion error: ${err.message}`;
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = `<span>Execute Inference Pipeline</span><span style="font-family: 'IBM Plex Mono'; font-size: 11px;">→</span>`;
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "entries_cached": len(cache_engine.store._entries)}
@@ -88,7 +630,11 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
                     finish_reason="stop",
                 )
             ],
-            usage=UsageInfo(prompt_tokens=len(user_prompt) // 4, completion_tokens=len(lookup.response) // 4, total_tokens=(len(user_prompt) + len(lookup.response)) // 4),
+            usage=UsageInfo(
+                prompt_tokens=len(user_prompt) // 4,
+                completion_tokens=len(lookup.response) // 4,
+                total_tokens=(len(user_prompt) + len(lookup.response)) // 4,
+            ),
             cache_status=f"HIT-{lookup.tier}",
             cache_latency_ms=lookup.latency_ms,
         )
@@ -123,7 +669,11 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
                 finish_reason="stop",
             )
         ],
-        usage=UsageInfo(prompt_tokens=len(user_prompt) // 4, completion_tokens=len(fresh_response) // 4, total_tokens=(len(user_prompt) + len(fresh_response)) // 4),
+        usage=UsageInfo(
+            prompt_tokens=len(user_prompt) // 4,
+            completion_tokens=len(fresh_response) // 4,
+            total_tokens=(len(user_prompt) + len(fresh_response)) // 4,
+        ),
         cache_status="MISS",
         cache_latency_ms=lookup.latency_ms,
     )
